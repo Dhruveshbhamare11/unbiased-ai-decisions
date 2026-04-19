@@ -12,7 +12,6 @@ This platform allows non-technical users to upload datasets and identify demogra
 - Lucide React (Icons)
 - Firebase (Authentication)
 
-### 🚀 Setup Instructions for First-Year Students
 If you've just downloaded this project, follow these steps to run it on your own computer!
 
 **Prerequisites:** You need to have Node.js installed on your computer.
