@@ -14,47 +14,52 @@ export const useAuth = () => useContext(AuthContext);
 export const AuthProvider = ({ children }) => {
   const [currentUser, setCurrentUser] = useState(null);
   const [loading, setLoading] = useState(true);
-
-  // For Demo Purposes before Firebase is actually connected:
-  const [isDemoMode] = useState(true);
+  const [error, setError] = useState(null);
 
   const loginWithGoogle = async () => {
-    if (isDemoMode) {
-      setCurrentUser({
-        displayName: "Google Judge",
-        email: "judge@google.com",
-        photoURL: ""
-      });
-      return;
+    try {
+      setError(null);
+      const provider = new GoogleAuthProvider();
+      provider.setCustomParameters({ prompt: 'select_account' });
+      const result = await signInWithPopup(auth, provider);
+      setCurrentUser(result.user);
+      return result.user;
+    } catch (err) {
+      setError(err.message);
+      console.error("Login error:", err);
+      throw err;
     }
-    const provider = new GoogleAuthProvider();
-    return signInWithPopup(auth, provider);
   };
 
   const logout = async () => {
-    if (isDemoMode) {
+    try {
+      setError(null);
+      await signOut(auth);
       setCurrentUser(null);
-      return;
+    } catch (err) {
+      setError(err.message);
+      console.error("Logout error:", err);
+      throw err;
     }
-    return signOut(auth);
   };
 
   useEffect(() => {
-    if (isDemoMode) {
-      setLoading(false);
-      return;
-    }
     const unsubscribe = onAuthStateChanged(auth, user => {
       setCurrentUser(user);
       setLoading(false);
+    }, error => {
+      setError(error.message);
+      setLoading(false);
     });
     return unsubscribe;
-  }, [isDemoMode]);
+  }, []);
 
   const value = {
     currentUser,
     loginWithGoogle,
-    logout
+    logout,
+    loading,
+    error
   };
 
   return (
