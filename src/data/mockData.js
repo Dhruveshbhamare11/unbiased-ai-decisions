@@ -1,28 +1,28 @@
-export const sampleCSV = `age,gender,education,years_experience,interview_score,hired
-28,Male,Bachelor,3,7,1
-32,Female,Master,5,8,0
-25,Male,Bachelor,1,6,1
-29,Female,Bachelor,4,7,0
-35,Male,Master,8,9,1
-27,Female,Bachelor,2,7,0
-31,Male,PhD,6,8,1
-30,Female,Master,5,9,0
-26,Male,Bachelor,2,6,1
-33,Female,PhD,7,9,1
-28,Male,High School,3,5,1
-24,Female,Bachelor,1,6,0
-36,Male,Master,9,8,1
-29,Female,Bachelor,4,7,0
-31,Male,Bachelor,5,7,1
-27,Female,Master,3,8,0
-34,Male,PhD,7,9,1
-26,Female,Bachelor,2,6,0
-30,Male,Bachelor,4,7,1
-28,Female,Master,4,8,0
-45,Male,Master,12,8,1
-41,Female,PhD,14,9,0
-23,Male,High School,1,5,1
-38,Female,Bachelor,8,7,0`;
+export const sampleCSV = `age,gender,education,years_experience,previous_salary,interview_score,hired
+28,Male,Bachelor,3,65000,7,1
+32,Female,Master,5,72000,8,0
+25,Male,Bachelor,1,58000,6,1
+29,Female,Bachelor,4,61000,7,0
+35,Male,Master,8,110000,9,1
+27,Female,Bachelor,2,55000,7,0
+31,Male,PhD,6,95000,8,1
+30,Female,Master,5,82000,9,0
+26,Male,Bachelor,2,63000,6,1
+33,Female,PhD,7,105000,9,1
+28,Male,High School,3,45000,5,1
+24,Female,Bachelor,1,52000,6,0
+36,Male,Master,9,120000,8,1
+29,Female,Bachelor,4,62000,7,0
+31,Male,Bachelor,5,78000,7,1
+27,Female,Master,3,68000,8,0
+34,Male,PhD,7,115000,9,1
+26,Female,Bachelor,2,54000,6,0
+30,Male,Bachelor,4,74000,7,1
+28,Female,Master,4,70000,8,0
+45,Male,Master,12,145000,8,1
+41,Female,PhD,14,135000,9,0
+23,Male,High School,1,40000,5,1
+38,Female,Bachelor,8,85000,7,0`;
 
 // ─────────────────────────────────────────────────────────────────────────────
 //  FAIRNESS SCORE FORMULA (PRD-Spec)
@@ -73,9 +73,8 @@ export const mockAnalysisResult = {
         { group: "Female", value: 0.42, label: "Positive Rate" },
       ],
       age: [
-        { group: "Under 30", value: 0.72, label: "Positive Rate" },
-        { group: "30–40",    value: 0.55, label: "Positive Rate" },
-        { group: "Over 40",  value: 0.34, label: "Positive Rate" },
+        { group: "Young (<35)",  value: 0.72, label: "Positive Rate" },
+        { group: "Senior (35+)", value: 0.34, label: "Positive Rate" },
       ],
     },
     disparate_impact: {
@@ -84,9 +83,8 @@ export const mockAnalysisResult = {
         { group: "Female",       value: 0.52, label: "Selection Rate" },
       ],
       age: [
-        { group: "Under 30 (ref.)", value: 1.00, label: "Impact Ratio" },
-        { group: "30–40",           value: 0.76, label: "Impact Ratio" },
-        { group: "Over 40",         value: 0.47, label: "Impact Ratio" },
+        { group: "Young (ref.)",    value: 1.00, label: "Impact Ratio" },
+        { group: "Senior",          value: 0.47, label: "Impact Ratio" },
       ],
     },
     equal_opportunity: {
@@ -95,9 +93,8 @@ export const mockAnalysisResult = {
         { group: "Female", value: 0.61, label: "True Positive Rate" },
       ],
       age: [
-        { group: "Under 30", value: 0.91, label: "True Positive Rate" },
-        { group: "30–40",    value: 0.72, label: "True Positive Rate" },
-        { group: "Over 40",  value: 0.48, label: "True Positive Rate" },
+        { group: "Young",  value: 0.91, label: "True Positive Rate" },
+        { group: "Senior", value: 0.48, label: "True Positive Rate" },
       ],
     },
     equalized_odds_difference: {
@@ -106,9 +103,8 @@ export const mockAnalysisResult = {
         { group: "Female", value: 0.38, label: "Avg(TPR, FPR)" },
       ],
       age: [
-        { group: "Under 30", value: 0.55, label: "Avg(TPR, FPR)" },
-        { group: "30–40",    value: 0.43, label: "Avg(TPR, FPR)" },
-        { group: "Over 40",  value: 0.31, label: "Avg(TPR, FPR)" },
+        { group: "Young",  value: 0.55, label: "Avg(TPR, FPR)" },
+        { group: "Senior", value: 0.31, label: "Avg(TPR, FPR)" },
       ],
     },
     predictive_parity: {
@@ -117,9 +113,8 @@ export const mockAnalysisResult = {
         { group: "Female", value: 0.55, label: "Precision" },
       ],
       age: [
-        { group: "Under 30", value: 0.79, label: "Precision" },
-        { group: "30–40",    value: 0.64, label: "Precision" },
-        { group: "Over 40",  value: 0.51, label: "Precision" },
+        { group: "Young",  value: 0.79, label: "Precision" },
+        { group: "Senior", value: 0.51, label: "Precision" },
       ],
     },
     average_odds_difference: {
@@ -128,9 +123,8 @@ export const mockAnalysisResult = {
         { group: "Female", value: 0.38, label: "Avg Odds Score" },
       ],
       age: [
-        { group: "Under 30", value: 0.55, label: "Avg Odds Score" },
-        { group: "30–40",    value: 0.43, label: "Avg Odds Score" },
-        { group: "Over 40",  value: 0.31, label: "Avg Odds Score" },
+        { group: "Young",  value: 0.55, label: "Avg Odds Score" },
+        { group: "Senior", value: 0.31, label: "Avg Odds Score" },
       ],
     },
   },
@@ -141,9 +135,8 @@ export const mockAnalysisResult = {
     Female: { hired: 38, not_hired: 62 },
   },
   age_stats: {
-    "Under 30": { hired: 72, not_hired: 28 },
-    "30-40":    { hired: 55, not_hired: 45 },
-    "Over 40":  { hired: 34, not_hired: 66 },
+    "Young (<35)":  { hired: 72, not_hired: 28 },
+    "Senior (35+)": { hired: 34, not_hired: 66 },
   },
 
   // ── BIAS CONTRIBUTORS (SHAP-based approximate attribution) ───────────────
@@ -169,15 +162,15 @@ export const mockAnalysisResult = {
       improvement: "+28 points",
     },
     {
-      title: "AIF360 Reweighing",
-      desc: "Uses IBM AIF360's Reweighing algorithm (aif360.algorithms.preprocessing.Reweighing) to assign higher sample weights to disadvantaged group instances during training. Directly addresses demographic bias at the data level without modifying the model architecture. No synthetic data generation required.",
+      title: "Mitigation 2: AIF360 Reweighing (Pre-Processing)",
+      desc: "Uses IBM AIF360's Reweighing algorithm to assign higher sample weights to disadvantaged group instances BEFORE training. Directly addresses demographic bias at the data level by fixing the dataset rather than modifying the model architecture.",
       impact: "High Impact",
       complexity: "Easy",
       improvement: "+18 points",
     },
     {
-      title: "Fairlearn Exponentiated Gradient (In-Processing)",
-      desc: "Unlike AIF360 Reweighing which adjusts the training data before the model sees it (pre-processing), Fairlearn's ExponentiatedGradient applies fairness constraints directly during the training loop itself. This forces the model to simultaneously optimize for accuracy and demographic parity — effective when pre-processing adjustments alone are insufficient to close the gap.",
+      title: "Mitigation 3: Fairlearn Exponentiated Gradient (In-Processing)",
+      desc: "Applies fairness constraints strictly DURING the training loop itself. This forces the model to simultaneously optimize for accuracy and demographic parity — effective when data-level pre-processing adjustments alone are insufficient.",
       impact: "Medium Impact",
       complexity: "Medium",
       improvement: "+12 points",
