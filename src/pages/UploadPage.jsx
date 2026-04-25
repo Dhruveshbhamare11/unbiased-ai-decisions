@@ -90,12 +90,29 @@ const UploadPage = () => {
     validateAndSetFile(sampleFile);
   };
 
-  const startAnalysis = () => {
+  const startAnalysis = async () => {
     if (!file) return;
     setIsAnalyzing(true);
     let step = 0;
 
-    const possibleSensitive = csvHeaders.filter(h =>
+    
+    if (useBackend) {
+      const formData = new FormData();
+      formData.append("file", file);
+      try {
+        const response = await fetch(apiUrl, {
+          method: "POST",
+          body: formData,
+        });
+        const data = await response.json();
+        // Data can be persisted to state or context here before navigating
+        console.log("Analysis Result from Backend:", data);
+      } catch (err) {
+        console.error("Backend Connection Error:", err);
+      }
+    }
+    
+    const possibleSensitive = csvHeaders.filter(h => 
       ['gender', 'sex', 'race', 'ethnicity', 'age', 'zip', 'zipcode'].some(s => h.toLowerCase().includes(s))
     );
 
