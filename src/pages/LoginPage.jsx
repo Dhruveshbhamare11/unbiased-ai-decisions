@@ -6,15 +6,22 @@ import { motion } from 'framer-motion';
 import { cn } from '../lib/utils';
 
 const LoginPage = () => {
-  const { loginWithGoogle } = useAuth();
+  const { loginWithGoogle, loading, error } = useAuth();
   const navigate = useNavigate();
+  const [isLoading, setIsLoading] = React.useState(false);
+  const [loginError, setLoginError] = React.useState(null);
 
   const handleLogin = async () => {
     try {
+      setIsLoading(true);
+      setLoginError(null);
       await loginWithGoogle();
       navigate('/dashboard');
     } catch (error) {
+      setLoginError(error.message || "Login failed. Please try again.");
       console.error("Login failed:", error);
+    } finally {
+      setIsLoading(false);
     }
   };
 
@@ -61,12 +68,31 @@ const LoginPage = () => {
             <div className="absolute -inset-1 bg-gradient-to-r from-accent-cyan to-accent-purple rounded-2xl blur opacity-25 group-hover:opacity-50 transition duration-1000 group-hover:duration-200"></div>
             <button
               onClick={handleLogin}
-              className="relative w-full flex justify-center items-center py-4 px-4 rounded-xl shadow-neo text-lg font-bold text-white bg-surface-dark border border-white/10 hover:bg-surface-light transition-all duration-300"
+              disabled={isLoading || loading}
+              className="relative w-full flex justify-center items-center py-4 px-4 rounded-xl shadow-neo text-lg font-bold text-white bg-surface-dark border border-white/10 hover:bg-surface-light transition-all duration-300 disabled:opacity-50 disabled:cursor-not-allowed"
             >
-              <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" className="h-6 w-6 mr-3 group-hover:scale-125 transition-transform duration-500" />
-              Authenticate (Google Demo Mode)
+              {isLoading ? (
+                <>
+                  <div className="h-6 w-6 mr-3 border-2 border-accent-cyan border-t-transparent rounded-full animate-spin"></div>
+                  Signing in...
+                </>
+              ) : (
+                <>
+                  <img src="https://www.svgrepo.com/show/475656/google-color.svg" alt="Google" className="h-6 w-6 mr-3 group-hover:scale-125 transition-transform duration-500" />
+                  Sign In with Google
+                </>
+              )}
             </button>
           </motion.div>
+
+          {(loginError || error) && (
+            <motion.div 
+              variants={itemVariants} 
+              className="p-4 bg-warning-amber/10 border border-warning-amber/30 rounded-lg text-warning-amber text-sm"
+            >
+              {loginError || error}
+            </motion.div>
+          )}
 
           {/* Features */}
           <motion.div variants={itemVariants} className="mt-12 pt-8 border-t border-white/10">

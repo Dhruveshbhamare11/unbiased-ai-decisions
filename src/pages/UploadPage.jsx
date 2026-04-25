@@ -5,6 +5,7 @@ import Navbar from '../components/Navbar';
 import { sampleCSV } from '../data/mockData';
 import { motion, AnimatePresence } from 'framer-motion';
 import { cn } from '../lib/utils';
+import { parseCSV, computeMetrics } from '../lib/fairnessEngine';
 
 const UploadPage = () => {
   const navigate = useNavigate();
@@ -15,6 +16,7 @@ const UploadPage = () => {
   const [loadingStep, setLoadingStep] = useState(0);
   const [csvHeaders, setCsvHeaders] = useState([]);
   const [mockConsole, setMockConsole] = useState([]);
+  const [csvText, setCsvText] = useState('');
   
   // Backend config stub for friend to use
   const [useBackend, setUseBackend] = useState(false);
@@ -66,58 +68,92 @@ const UploadPage = () => {
     }
     setFile(f);
     
-    // Attempt dynamic parsing for real feel
+    // Read full CSV text for real analysis
     const reader = new FileReader();
     reader.onload = (e) => {
-       const text = e.target.result;
-       const firstLine = text.split('\n')[0];
-       if(firstLine) {
-         setCsvHeaders(firstLine.split(',').map(h => h.trim().replace(/['"]/g, '')).filter(h=>h));
-       }
+      const text = e.target.result;
+      setCsvText(text);
+      localStorage.setItem('uploadedCsvText', text);
+      const firstLine = text.split('\n')[0];
+      if (firstLine) {
+        setCsvHeaders(firstLine.split(',').map(h => h.trim().replace(/['"]/g, '')).filter(h => h));
+      }
     };
-    reader.readAsText(f.slice(0, 5000));
+    reader.readAsText(f);
   };
 
   const selectLibraryDataset = (datasetName) => {
+    setCsvText(sampleCSV);
+    localStorage.setItem('uploadedCsvText', sampleCSV);
     const blob = new Blob([sampleCSV], { type: 'text/csv' });
     const sampleFile = new File([blob], datasetName, { type: 'text/csv' });
     validateAndSetFile(sampleFile);
   };
 
-  const startAnalysis = () => {
+  const startAnalysis = async () => {
     if (!file) return;
     setIsAnalyzing(true);
     let step = 0;
+
     
-    // TODO for backend developer: 
-    // If useBackend is true, here is where you make the fetch() call to 'apiUrl' 
-    // with the FormData containing the CSV file.
+    if (useBackend) {
+      const formData = new FormData();
+      formData.append("file", file);
+      try {
+        const response = await fetch(apiUrl, {
+          method: "POST",
+          body: formData,
+        });
+        const data = await response.json();
+        // Data can be persisted to state or context here before navigating
+        console.log("Analysis Result from Backend:", data);
+      } catch (err) {
+        console.error("Backend Connection Error:", err);
+      }
+    }
     
     const possibleSensitive = csvHeaders.filter(h => 
       ['gender', 'sex', 'race', 'ethnicity', 'age', 'zip', 'zipcode'].some(s => h.toLowerCase().includes(s))
     );
-    
+
     const dynamicLogs = [
       useBackend ? `[SYS] Hooking into remote API at ${apiUrl}...` : `[SYS] Initializing Local Audit Engine...`,
-      `[FS] Loaded ${file.name} (${(file.size/1024).toFixed(1)} KB)`,
+      `[FS] Loaded ${file.name} (${(file.size / 1024).toFixed(1)} KB)`,
       `[DATA] Detected ${csvHeaders.length} columns`,
       `[WARN] Potential sensitive features isolated: [${possibleSensitive.length ? possibleSensitive.join(', ') : 'Inferred Proxies'}]`,
       `[PROC] Running fairness matrices...`,
       `[PROC] Executing bias classifiers...`,
-      `[SYS] Threshold violations detected!`,
+      `[PROC] Detecting proxy features & computing metrics...`,
       `[SYS] Compiling mitigation manifest...`
     ];
 
     setMockConsole([dynamicLogs[0]]);
 
+    // Run real analysis in background
+    const runRealAnalysis = () => {
+      try {
+        const src = csvText || localStorage.getItem('uploadedCsvText') || '';
+        if (src) {
+          const { data } = parseCSV(src);
+          if (data && data.length > 0) {
+            const result = computeMetrics(data);
+            if (result) {
+              // Determine risk level from score
+              const riskLevel = result.score >= 80 ? 'Low' : result.score >= 60 ? 'Moderate' : 'High';
+              localStorage.setItem('analysisResult', JSON.stringify({ ...result, riskLevel, filename: file.name }));
+            }
+          }
+        }
+      } catch (e) {
+        console.error('Analysis error:', e);
+      }
+    };
+
     const interval = setInterval(() => {
       step++;
       setLoadingStep(step);
-      
-      if (step < dynamicLogs.length) {
-        setMockConsole(prev => [...prev, dynamicLogs[step]]);
-      }
-
+      if (step < dynamicLogs.length) setMockConsole(prev => [...prev, dynamicLogs[step]]);
+      if (step === Math.floor(loadingSteps.length / 2)) runRealAnalysis();
       if (step >= loadingSteps.length) {
         clearInterval(interval);
         setTimeout(() => navigate('/results'), 1200);

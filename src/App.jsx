@@ -8,6 +8,7 @@ import DashboardPage from './pages/DashboardPage';
 import UploadPage from './pages/UploadPage';
 import ResultsPage from './pages/ResultsPage';
 import HistoryPage from './pages/HistoryPage';
+import ComparisonPage from './pages/ComparisonPage'; // Added import
 
 const ProtectedRoute = ({ children }) => {
   const { currentUser } = useAuth();
@@ -35,6 +36,10 @@ const AppRoutes = () => {
       <Route 
         path="/results" 
         element={<ProtectedRoute><ResultsPage /></ProtectedRoute>} 
+      />
+      <Route 
+        path="/comparison" 
+        element={<ProtectedRoute><ComparisonPage /></ProtectedRoute>} 
       />
       <Route 
         path="/history" 
