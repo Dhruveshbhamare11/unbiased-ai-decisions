@@ -34,11 +34,11 @@ const LoginPage = () => {
  <Scale className="h-14 w-14 text-white"/>
  </div>
  <h2 className="mt-10 text-5xl font-black tracking-tight text-white flex flex-col items-center">
- <span>UNBIASED</span>
- <span className="text-slate-400 tracking-widest mt-1">DECISION</span>
+ <span>FAIRLENS</span>
+ <span className="text-blue-400 tracking-widest mt-1">AI</span>
  </h2>
  <p className="mt-5 text-sm text-slate-500 font-bold tracking-[0.2em] uppercase">
- Algorithmic Fairness Protocol
+ AI Bias Detection & Mitigation Platform
  </p>
  </div>
 
