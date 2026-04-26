@@ -344,7 +344,7 @@ const ComparisonPage = () => {
  <div className="font-mono text-sm leading-tight text-white/90 bg-[#0a0a0a] p-10 border-2 border-[#333] rounded-sm max-w-2xl w-full">
  <pre className="text-green-500 mb-6 text-sm">
 {`╔═════════════════════════════════════════════╗
-║ UNBIASED.AI COMPLIANCE CERTIFICATE ║
+║ FAIRLENS AI COMPLIANCE CERTIFICATE ║
 ║ ║
 ║ Dataset : debiased_engineers_v4.csv ║
 ║ Score : ${debiasedResult.statsAfter.score}/100 ✓ COMPLIANT ║

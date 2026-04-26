@@ -20,7 +20,7 @@ const Navbar = () => {
  <Scale className="w-5 h-5 text-white"/>
  </div>
  <span className="font-extrabold text-xl tracking-wide text-white flex items-center">
- <span className="pr-1">UNBIASED.AI</span> 
+ <span className="pr-1">FAIRLENS AI</span> 
  <span className="text-slate-400 text-sm font-semibold ml-2"> // AUDIT</span>
  </span>
  </Link>

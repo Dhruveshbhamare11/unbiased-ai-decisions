@@ -185,7 +185,7 @@ Format as JSON array EXACTLY like this:
  setIsDownloading(true);
  setTimeout(() => {
  setIsDownloading(false);
- let r = `UNBIASED.AI FAIRNESS AUDIT REPORT\n`;
+ let r = `FAIRLENS AI FAIRNESS AUDIT REPORT\n`;
  r += `Generated: ${new Date().toISOString()}\n`;
  const blob = new Blob([r], { type: 'text/plain' });
  const url = URL.createObjectURL(blob);
