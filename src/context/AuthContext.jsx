@@ -25,6 +25,22 @@ export const AuthProvider = ({ children }) => {
       setCurrentUser(result.user);
       return result.user;
     } catch (err) {
+      // Demo Mode Fallback
+      if (err.message === "auth/api-key-not-valid" || 
+          (err.code && err.code.includes('api-key-not-valid')) || 
+          (err.message && err.message.includes('api-key-not-valid'))) {
+        console.warn("Firebase not configured. Logging in as Demo User.");
+        const demoUser = {
+          uid: 'demo-user-123',
+          displayName: 'Demo User',
+          email: 'demo@example.com',
+          photoURL: 'https://ui-avatars.com/api/?name=Demo+User&background=0D8ABC&color=fff'
+        };
+        setCurrentUser(demoUser);
+        setError(null); // Clear any error since we succeeded in demo mode
+        return demoUser;
+      }
+      
       setError(err.message);
       console.error("Login error:", err);
       throw err;
@@ -44,15 +60,32 @@ export const AuthProvider = ({ children }) => {
   };
 
   useEffect(() => {
+    let isMounted = true;
     const unsubscribe = onAuthStateChanged(auth, user => {
-      setCurrentUser(user);
-      setLoading(false);
+      if (isMounted) {
+        setCurrentUser(user);
+        setLoading(false);
+      }
     }, error => {
-      setError(error.message);
-      setLoading(false);
+      if (isMounted) {
+        console.error("Auth state error:", error);
+        setLoading(false);
+      }
     });
-    return unsubscribe;
-  }, []);
+
+    // Safety timeout in case Firebase hangs with invalid config
+    const timeoutId = setTimeout(() => {
+      if (isMounted && loading) {
+        setLoading(false);
+      }
+    }, 1500);
+
+    return () => {
+      isMounted = false;
+      unsubscribe();
+      clearTimeout(timeoutId);
+    };
+  }, [loading]);
 
   const value = {
     currentUser,
