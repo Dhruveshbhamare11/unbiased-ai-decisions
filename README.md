@@ -1,7 +1,7 @@
-# ⚖️ Unbiased AI Decisions
-> **Algorithmic Fairness Protocol & Mitigation Engine**
+# ⚖️ FairLens AI
+> **AI Bias Detection & Mitigation Platform**
 
-Welcome to **Unbiased AI Decisions**, an enterprise-grade, privacy-first platform engineered to detect, visualize, and autonomously mitigate demographic bias in predictive AI models. 
+Welcome to **FairLens AI**, an enterprise-grade, privacy-first platform engineered to detect, visualize, and autonomously mitigate demographic bias in predictive AI models. 
 
 Designed for the **Google Solution Challenge 2026**, this platform empowers data scientists, compliance officers, and non-technical stakeholders to ensure their models comply with strict regulatory frameworks like the **EU AI Act** and **EEOC Guidelines**.
 
