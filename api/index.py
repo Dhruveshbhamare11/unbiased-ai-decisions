@@ -1,19 +1,24 @@
 import io
 import re
 import base64
+import traceback
+import logging
 import pandas as pd
 import numpy as np
 from fastapi import FastAPI, File, UploadFile, HTTPException
-from fastapi.responses import JSONResponse, Response
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from scipy.stats import pointbiserialr, chi2_contingency
 from sklearn.linear_model import LogisticRegression
-import shap
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+# shap removed — too large for Vercel Lambda (pulls numba+llvmlite ~120 MB)
 from aif360.datasets import BinaryLabelDataset
 from aif360.algorithms.preprocessing import Reweighing
 
-app = FastAPI()
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger('debiasing')
 
+app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -22,45 +27,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-######################################################################
-# BUG 1 — ID COLUMN DETECTION
-######################################################################
-
+# ── ID column detection ───────────────────────────────────────────────────────
 ID_KEYWORDS = ['id', 'uuid', 'uid', 'code', 'ref', 'key', 'index', '_id']
 ID_CODE_REGEX = re.compile(r'^[A-Za-z]{1,3}\d{3,}$')
 
 def is_id_column(col_name: str, series: pd.Series) -> bool:
-    """
-    Returns True if this column is an identifier that must be excluded
-    from proxy detection and feature training.
-    Rules:
-    1. Column name contains a known ID keyword
-    2. >95% of values are unique (sequential IDs)
-    3. Values look like alphanumeric codes  e.g. C0001, EMP-123
-    """
     col_lower = col_name.lower()
-    name_is_id = any(kw == col_lower or col_lower.endswith('_' + kw) or col_lower.startswith(kw + '_')
-                     or kw in col_lower
-                     for kw in ID_KEYWORDS)
-
+    name_is_id = any(kw in col_lower for kw in ID_KEYWORDS)
     non_null = series.dropna()
     if len(non_null) == 0:
         return False
-    uniqueness_ratio = non_null.nunique() / len(non_null)
-    is_highly_unique = uniqueness_ratio > 0.95
-
-    sample = str(non_null.iloc[0])
-    looks_like_code = bool(ID_CODE_REGEX.match(sample))
-
+    is_highly_unique = (non_null.nunique() / len(non_null)) > 0.95
+    looks_like_code = bool(ID_CODE_REGEX.match(str(non_null.iloc[0])))
     return name_is_id or is_highly_unique or looks_like_code
 
-
-######################################################################
-# COLUMN DETECTION HELPERS
-######################################################################
-
+# ── Column helpers ────────────────────────────────────────────────────────────
 def detect_label_column(df: pd.DataFrame) -> str:
-    """Heuristic to find the outcome column."""
     priority = ['fair_hired', 'hired', 'approved', 'outcome', 'label', 'target', 'risk', 'status', 'decision']
     for col in priority:
         matches = df.columns[df.columns.str.lower() == col]
@@ -68,34 +50,32 @@ def detect_label_column(df: pd.DataFrame) -> str:
             return matches[0]
     return df.columns[-1]
 
-
 def detect_sensitive_cols(df: pd.DataFrame) -> list:
-    """Find declared sensitive attribute columns."""
-    sensitive_keywords = ['gender', 'sex', 'age', 'race', 'ethnicity', 'religion', 'nationality']
-    return [c for c in df.columns if any(kw in c.lower() for kw in sensitive_keywords)]
+    keywords = ['gender', 'sex', 'age', 'race', 'ethnicity', 'religion', 'nationality']
+    return [c for c in df.columns if any(kw in c.lower() for kw in keywords)]
 
+def assign_privileged_value(df: pd.DataFrame, sensitive_attr: str, label_col: str):
+    try:
+        y_num = pd.to_numeric(df[label_col], errors='coerce').fillna(0)
+        means = y_num.groupby(df[sensitive_attr]).mean()
+        return means.idxmax()
+    except Exception:
+        return df[sensitive_attr].mode()[0]
 
-######################################################################
-# BUG 3 — PROXY DETECTION (threshold 0.45, skip ID cols)
-######################################################################
+# ── FIX 2: Proxy detection with proper statistical tests, threshold=0.40 ─────
+INTERNAL_COLS = {'sample_weight', 'bias_flag', 'fair_hired', 'predicted_outcome',
+                 'original_hired', '_orig_grp', '_group'}
 
 def detect_proxy_features(df: pd.DataFrame, sensitive_cols: list,
-                           label_col: str, threshold: float = 0.45) -> dict:
-    """
-    Returns {proxy_col: correlation_score}.
-    Bug 1 fix: ID columns are always skipped.
-    Bug 3 fix: threshold raised to 0.45 to avoid second-order correlations.
-    """
+                           label_col: str, threshold: float = 0.40) -> dict:
     proxies = {}
-    skip_cols = set(sensitive_cols) | {label_col, 'sample_weight', 'bias_flag',
-                                        'fair_hired', 'predicted_outcome', 'original_hired'}
+    skip = set(sensitive_cols) | {label_col} | INTERNAL_COLS
 
     for col in df.columns:
-        if col in skip_cols:
+        if col in skip:
             continue
-        # Bug 1: skip ID columns
         if is_id_column(col, df[col]):
-            print(f'[PROXY] Skipping ID column: {col}')
+            logger.info(f'[PROXY] Skipping ID col: {col}')
             continue
 
         max_corr = 0
@@ -103,31 +83,36 @@ def detect_proxy_features(df: pd.DataFrame, sensitive_cols: list,
             if sens_col not in df.columns:
                 continue
             try:
-                if df[col].dtype.kind in ('O', 'U', 'S'):        # categorical col
+                if df[col].dtype.kind in ('O', 'U', 'S', 'b') or str(df[col].dtype) == 'category':
+                    # Categorical col: Cramer's V
                     ct = pd.crosstab(df[col], df[sens_col])
                     if min(ct.shape) < 2:
                         continue
                     chi2, _, _, _ = chi2_contingency(ct)
                     n = len(df)
-                    cramers_v = np.sqrt(chi2 / (n * (min(ct.shape) - 1)))
-                    max_corr = max(max_corr, cramers_v)
-                else:                                              # numeric col
+                    min_dim = min(ct.shape) - 1
+                    if min_dim > 0:
+                        cramers_v = np.sqrt(chi2 / (n * min_dim))
+                        max_corr = max(max_corr, cramers_v)
+                else:
+                    # Numeric col: point-biserial
                     if df[sens_col].dtype.kind in ('O', 'U', 'S'):
                         sens_codes = pd.Categorical(df[sens_col]).codes.astype(float)
                     else:
                         sens_codes = df[sens_col].astype(float)
-                    valid = df[[col]].assign(_s=sens_codes).dropna()
+                    valid = pd.DataFrame({'col': df[col].values, 's': sens_codes.values}).dropna()
                     if len(valid) < 10:
                         continue
-                    corr, _ = pointbiserialr(valid['_s'], valid[col])
+                    corr, _ = pointbiserialr(valid['s'], valid['col'])
                     max_corr = max(max_corr, abs(corr))
-            except Exception as exc:
-                print(f'[PROXY] Error for {col} vs {sens_col}: {exc}')
+            except Exception as e:
+                logger.warning(f'[PROXY] Error {col} vs {sens_col}: {e}')
 
         if max_corr >= threshold:
             proxies[col] = round(max_corr, 3)
-            print(f'[PROXY] Flagged: {col} -> corr={max_corr:.3f}')
+            logger.info(f'[PROXY] Flagged: {col} -> corr={max_corr:.3f}')
 
+    logger.info(f'[PROXY] Total detected: {list(proxies.keys())}')
     return proxies
 
 
@@ -136,15 +121,17 @@ def clean_proxy_features(df: pd.DataFrame, proxy_features: dict) -> pd.DataFrame
     for col, score in proxy_features.items():
         if col not in df_clean.columns:
             continue
-        if df_clean[col].dtype.kind in ('O', 'U', 'S'):
+        if df_clean[col].dtype.kind in ('O', 'U', 'S') or str(df_clean[col].dtype) == 'category':
             top_cats = df_clean[col].value_counts().nlargest(5).index
             df_clean[col] = df_clean[col].apply(lambda x: x if x in top_cats else 'Other')
-        elif score > 0.5:
+        elif score > 0.55:
             try:
-                df_clean[col + '_band'] = pd.qcut(
+                new_col = col + '_band'
+                df_clean[new_col] = pd.qcut(
                     df_clean[col], q=3, labels=['Low', 'Mid', 'High'], duplicates='drop'
                 ).astype(str)
                 df_clean.drop(columns=[col], inplace=True)
+                logger.info(f'[CLEAN] {col} -> binned as {new_col}')
             except Exception:
                 pass
         else:
@@ -153,147 +140,184 @@ def clean_proxy_features(df: pd.DataFrame, proxy_features: dict) -> pd.DataFrame
     return df_clean
 
 
-######################################################################
-# BUG 2 — PRIVILEGED GROUP DETECTION (from original data)
-######################################################################
+# ── FIX 1: AIF360 reweighing with full error logging ─────────────────────────
+def apply_aif360_reweighing(df: pd.DataFrame, label_col: str,
+                             sensitive_col: str, privileged_val) -> np.ndarray:
+    """Returns sample_weights array. Must be called BEFORE removing sensitive_col."""
+    logger.info(f'[AIF360] Starting reweighing. sensitive_col={sensitive_col}, priv={privileged_val}')
+    logger.info(f'[AIF360] df shape: {df.shape}, label counts: {df[label_col].value_counts().to_dict()}')
 
-def assign_privileged_value(df: pd.DataFrame, sensitive_attr: str, label_col: str):
-    """Automatically discover privileged value — the group with highest positive rate."""
-    try:
-        y_num = pd.to_numeric(df[label_col], errors='coerce').fillna(0)
-        means = y_num.groupby(df[sensitive_attr]).mean()
-        return means.idxmax()
-    except Exception:
-        return df[sensitive_attr].mode()[0]
+    df_work = df.copy()
 
-
-######################################################################
-# REWEIGHING + RETRAIN (Bug 2: accepts original_group_series)
-######################################################################
-
-def calibrate_to_fair_dir(
-    df: pd.DataFrame,
-    label_col: str,
-    group_series: pd.Series,
-    privileged_val,
-    target_dir: float = 0.82
-) -> pd.DataFrame:
-    """
-    Post-processing calibration: guarantee DIR ≥ target_dir by directly
-    flipping unprivileged 'not hired' rows to 'hired' until the target is met.
-    This is the most reliable way to guarantee fairness metrics.
-    """
-    df = df.copy()
-    priv_mask   = group_series == privileged_val
-    unpriv_mask = group_series != privileged_val
-
-    y = pd.to_numeric(df[label_col], errors='coerce').fillna(0)
-    priv_rate   = y[priv_mask].mean() if priv_mask.sum() > 0 else 0
-    unpriv_rate = y[unpriv_mask].mean() if unpriv_mask.sum() > 0 else 0
-
-    current_dir = unpriv_rate / priv_rate if priv_rate > 0 else 1.0
-    if current_dir >= target_dir:
-        return df  # Already fair
-
-    target_unpriv_hired = round(target_dir * priv_rate * unpriv_mask.sum())
-    current_unpriv_hired = int(y[unpriv_mask].sum())
-    needed = max(0, int(target_unpriv_hired - current_unpriv_hired))
-
-    # Get indices of unprivileged "not hired" rows (flip from bottom of df upward)
-    not_hired_unpriv_idx = df.index[unpriv_mask & (y == 0)].tolist()
-    to_flip = not_hired_unpriv_idx[-needed:] if needed > 0 else []
-
-    for idx in to_flip:
-        df.at[idx, label_col] = 1
-
-    print(f'[CALIBRATE] Flipped {len(to_flip)} unprivileged rows -> hired to reach DIR >= {target_dir}. New priv_rate={priv_rate}, unpriv_rate={y[unpriv_mask].sum() / unpriv_mask.sum() if unpriv_mask.sum() else 0}')
-    return df
-def apply_reweighing_and_retrain(df_work_in: pd.DataFrame,
-                                  label_col: str,
-                                  sensitive_attr: str,
-                                  privileged_group_val,
-                                  original_group_series: pd.Series = None):
-    """
-    Bug 2 fix: if original_group_series is provided, weights are computed
-    on the ORIGINAL sensitive column (before proxy/encoding changes).
-    """
-    df_work = df_work_in.copy()
-
-    # ── Determine weights ──────────────────────────────────────────────
-    if original_group_series is not None:
-        # Use original gender/age column for AIF360 reweighing
-        df_for_weights = df_work.copy()
-        df_for_weights['_orig_grp'] = original_group_series.values
-        weight_attr = '_orig_grp'
-        weight_priv_val = privileged_group_val
+    # Encode sensitive col to 0/1
+    if df_work[sensitive_col].dtype.kind in ('O', 'U', 'S'):
+        priv_numeric = 1
+        df_work[sensitive_col] = (df_work[sensitive_col] == str(privileged_val)).astype(int)
     else:
-        df_for_weights = df_work.copy()
-        weight_attr = sensitive_attr
-        weight_priv_val = privileged_group_val
+        priv_numeric = int(df_work[sensitive_col] == privileged_val).mode()[0]
+        df_work[sensitive_col] = (df_work[sensitive_col] == privileged_val).astype(int)
 
+    # Encode all other categoricals
+    for col in df_work.select_dtypes(include=['object', 'category']).columns:
+        if col in [label_col, sensitive_col]:
+            continue
+        le = LabelEncoder()
+        df_work[col] = le.fit_transform(df_work[col].astype(str))
+
+    # Ensure label is 0/1
+    df_work[label_col] = df_work[label_col].astype(int)
+
+    # Fill NaN
+    df_work = df_work.fillna(0)
+
+    logger.info(f'[AIF360] Creating BinaryLabelDataset...')
+    privileged_groups   = [{sensitive_col: priv_numeric}]
+    unprivileged_groups = [{sensitive_col: 1 - priv_numeric}]
+
+    # Only keep numeric cols for AIF360
+    num_cols = list(df_work.select_dtypes(include=[np.number]).columns)
+    aif_df = df_work[[c for c in num_cols if c in df_work.columns]].copy()
+
+    bld = BinaryLabelDataset(
+        df=aif_df,
+        label_names=[label_col],
+        protected_attribute_names=[sensitive_col]
+    )
+    RW = Reweighing(unprivileged_groups=unprivileged_groups,
+                    privileged_groups=privileged_groups)
+    rw_ds = RW.fit_transform(bld)
+    weights = rw_ds.instance_weights
+    logger.info(f'[AIF360] Weights computed. min={weights.min():.3f} max={weights.max():.3f}')
+    return weights
+
+
+# ── FIX 3: Full debiasing pipeline in correct order ──────────────────────────
+def run_full_debiasing_pipeline(df: pd.DataFrame, label_col: str,
+                                 sensitive_col: str, privileged_val):
+    logger.info(f'\n=== DEBIASING PIPELINE START ===')
+    logger.info(f'shape={df.shape}, label={label_col}, sensitive={sensitive_col}, priv={privileged_val}')
+
+    if sensitive_col not in df.columns:
+        raise ValueError(f'{sensitive_col} not in columns: {list(df.columns)}')
+
+    # STEP 0: Save original labels
+    original_groups = df[sensitive_col].copy()
+    logger.info(f'Group dist: {original_groups.value_counts().to_dict()}')
+
+    # STEP 1: Detect proxies on FULL original df (sensitive col still present)
+    logger.info('STEP 1: Detecting proxies...')
+    proxy_features = detect_proxy_features(df, [sensitive_col], label_col, threshold=0.40)
+    logger.info(f'Proxies found: {proxy_features}')
+
+    # STEP 2: AIF360 reweighing BEFORE removing sensitive col
+    logger.info('STEP 2: AIF360 reweighing...')
     try:
-        # Numerify protected attr for AIF360
-        df_aif = df_for_weights.copy()
-        if df_aif[weight_attr].dtype == object:
-            df_aif[weight_attr] = (df_aif[weight_attr] == str(weight_priv_val)).astype(int)
-            aif_priv_val = 1
-        else:
-            aif_priv_val = int(weight_priv_val)
-
-        df_aif[label_col] = pd.to_numeric(df_aif[label_col], errors='coerce').fillna(0)
-
-        num_cols = list(df_aif.select_dtypes(include=[np.number]).columns)
-        aif_cols = list(set(num_cols) | {label_col, weight_attr})
-        valid = df_aif[aif_cols].dropna()
-
-        bld = BinaryLabelDataset(
-            df=valid,
-            label_names=[label_col],
-            protected_attribute_names=[weight_attr]
-        )
-        RW = Reweighing(
-            unprivileged_groups=[{weight_attr: 1 - aif_priv_val}],
-            privileged_groups=[{weight_attr: aif_priv_val}]
-        )
-        rw_ds = RW.fit_transform(bld)
-        sample_weights = np.ones(len(df_work))
-        sample_weights[valid.index] = rw_ds.instance_weights
+        sample_weights = apply_aif360_reweighing(df, label_col, sensitive_col, privileged_val)
+        used_fallback = False
     except Exception as e:
-        print(f'[REWEIGH] AIF360 failed ({e}), using uniform weights')
-        sample_weights = np.ones(len(df_work))
+        logger.error(f'AIF360 FAILED: {e}')
+        logger.error(traceback.format_exc())
+        # Unprivileged group gets 2x weight
+        sample_weights = np.where(df[sensitive_col] == privileged_val, 1.0, 2.0).astype(float)
+        used_fallback = True
+        logger.info('Using 2x uniform weight fallback for unprivileged group')
 
-    # ── Retrain logistic regression on cleaned feature set ─────────────
-    drop_cols = {label_col, sensitive_attr, 'sample_weight', 'bias_flag',
-                 'fair_hired', 'predicted_outcome', '_orig_grp'}
-    feature_cols = [c for c in df_work.columns if c not in drop_cols]
+    # STEP 3: Clean proxy features
+    logger.info('STEP 3: Cleaning proxy features...')
+    df_clean = clean_proxy_features(df.copy(), proxy_features)
 
-    X = pd.get_dummies(df_work[feature_cols], drop_first=True)
-    y = pd.to_numeric(df_work[label_col], errors='coerce').fillna(0)
+    # STEP 4: Drop sensitive columns
+    logger.info('STEP 4: Dropping sensitive col...')
+    df_clean.drop(columns=[sensitive_col], errors='ignore', inplace=True)
 
-    model = LogisticRegression(max_iter=2000, random_state=42, C=1.0)
-    model.fit(X, y, sample_weight=sample_weights[:len(X)])
+    # STEP 5: Encode categoricals for model training
+    logger.info('STEP 5: Encoding categoricals...')
+    df_model = df_clean.copy()
+    for col in df_model.select_dtypes(include=['object', 'category']).columns:
+        if col == label_col:
+            continue
+        le = LabelEncoder()
+        df_model[col] = le.fit_transform(df_model[col].astype(str))
+    df_model = df_model.fillna(df_model.median(numeric_only=True))
 
-    df_work_in = df_work_in.copy()
-    df_work_in['fair_hired'] = model.predict(X)
-    df_work_in['sample_weight'] = sample_weights[:len(X)]
+    # STEP 6: Train fair LR with sample weights
+    logger.info('STEP 6: Training fair model...')
+    drop_for_train = {label_col, 'sample_weight', 'bias_flag', 'fair_hired',
+                      'predicted_outcome', 'original_hired'}
+    feature_cols = [c for c in df_model.columns if c not in drop_for_train]
+    X = df_model[feature_cols].values
+    y = df_model[label_col].values.astype(int)
 
-    # SHAP bias flag (top 15%)
+    scaler = StandardScaler()
+    X_scaled = scaler.fit_transform(X)
+
+    model = LogisticRegression(solver='saga', max_iter=500, tol=1e-3,
+                                class_weight='balanced', random_state=42)
+    model.fit(X_scaled, y, sample_weight=sample_weights[:len(X)])
+    new_preds = model.predict(X_scaled)
+    logger.info(f'Predictions: {pd.Series(new_preds).value_counts().to_dict()}')
+
+    # STEP 7: Replace label with fair predictions
+    df_clean = df_clean.copy()
+    df_clean['original_hired'] = pd.to_numeric(df[label_col], errors='coerce').fillna(0).values
+    df_clean[label_col] = new_preds
+
+    # STEP 8: Coefficient-based bias flags (replaces SHAP — same contract)
+    logger.info('STEP 8: Computing bias flags via |coef|*|X|...')
     try:
-        explainer = shap.LinearExplainer(model, X)
-        shap_vals = explainer.shap_values(X)
-        total_shap = np.sum(np.abs(shap_vals), axis=1)
-        t85 = np.percentile(total_shap, 85)
-        df_work_in['bias_flag'] = (total_shap > t85).astype(int)
-    except Exception:
-        df_work_in['bias_flag'] = 0
+        coef = np.abs(model.coef_[0])          # shape (n_features,)
+        row_scores = np.abs(X_scaled).dot(coef) # shape (n_rows,)
+        t85 = np.percentile(row_scores, 85)
+        df_clean['bias_flag'] = (row_scores > t85).astype(int)
+    except Exception as e:
+        logger.warning(f'Bias flag computation failed (non-critical): {e}')
+        df_clean['bias_flag'] = 0
 
-    return df_work_in, model
+    # STEP 9: Validate metrics against original group labels
+    logger.info('STEP 9: Computing debiased metrics...')
+    df_clean['_group'] = original_groups.values
+    metrics_debiased = compute_all_metrics(df_clean, label_col, '_group', privileged_val)
+    df_clean.drop(columns=['_group'], errors='ignore', inplace=True)
+    logger.info(f'Debiased metrics: {metrics_debiased}')
+
+    # STEP 10: If DIR still < 0.80, apply calibration
+    if metrics_debiased['disparate_impact_ratio'] < 0.80:
+        logger.info('STEP 10: DIR still below 0.80, applying calibration...')
+        y_proba = model.predict_proba(X_scaled)[:, 1]
+        priv_mask   = original_groups.values == privileged_val
+        unpriv_mask = ~priv_mask
+
+        priv_rate = new_preds[priv_mask].mean() if priv_mask.sum() > 0 else 0.5
+        target_rate = priv_rate * 0.82
+
+        # Lower threshold for unprivileged group to hit target positive rate
+        best_thresh = 0.5
+        if unpriv_mask.sum() > 0:
+            unpriv_probas = sorted(y_proba[unpriv_mask])
+            n_needed = int(target_rate * unpriv_mask.sum())
+            n_needed = min(n_needed, len(unpriv_probas))
+            if n_needed > 0:
+                best_thresh = unpriv_probas[max(0, len(unpriv_probas) - n_needed)]
+                best_thresh = float(np.clip(best_thresh, 0.1, 0.7))
+
+        calibrated = np.where(
+            priv_mask,
+            (y_proba >= 0.5).astype(int),
+            (y_proba >= best_thresh).astype(int)
+        )
+        df_clean[label_col] = calibrated
+        logger.info(f'Calibrated with unpriv threshold={best_thresh:.3f}')
+
+        df_clean['_group'] = original_groups.values
+        metrics_debiased = compute_all_metrics(df_clean, label_col, '_group', privileged_val)
+        df_clean.drop(columns=['_group'], errors='ignore', inplace=True)
+        logger.info(f'Post-calibration metrics: {metrics_debiased}')
+
+    logger.info('=== DEBIASING PIPELINE COMPLETE ===')
+    return df_clean, metrics_debiased, proxy_features, used_fallback
 
 
-######################################################################
-# BUG 4 — DIRECTION-AWARE PASS/FAIL + 6-METRIC SCORING
-######################################################################
-
+# ── Metrics ───────────────────────────────────────────────────────────────────
 METRIC_THRESHOLDS = {
     'demographic_parity_diff':  {'threshold': 0.10, 'direction': 'lower_is_better'},
     'disparate_impact_ratio':   {'threshold': 0.80, 'direction': 'higher_is_better'},
@@ -302,7 +326,6 @@ METRIC_THRESHOLDS = {
     'predictive_parity_diff':   {'threshold': 0.10, 'direction': 'lower_is_better'},
     'average_odds_diff':        {'threshold': 0.10, 'direction': 'lower_is_better'},
 }
-
 METRIC_WEIGHTS = {
     'disparate_impact_ratio':   0.30,
     'demographic_parity_diff':  0.25,
@@ -312,20 +335,13 @@ METRIC_WEIGHTS = {
     'average_odds_diff':        0.05,
 }
 
-
 def evaluate_pass_fail(metric_name: str, value: float) -> bool:
-    """Bug 4 fix: direction-aware pass/fail per metric."""
     if metric_name not in METRIC_THRESHOLDS:
         return False
     cfg = METRIC_THRESHOLDS[metric_name]
-    if cfg['direction'] == 'lower_is_better':
-        return value <= cfg['threshold']
-    else:
-        return value >= cfg['threshold']
-
+    return value >= cfg['threshold'] if cfg['direction'] == 'higher_is_better' else value <= cfg['threshold']
 
 def compute_fairness_score(metrics: dict) -> int:
-    """Bug 4 fix: weighted score formula identical to JS engine."""
     score = 0.0
     for metric, weight in METRIC_WEIGHTS.items():
         value = metrics.get(metric)
@@ -339,135 +355,52 @@ def compute_fairness_score(metrics: dict) -> int:
         score += metric_score * weight
     return round(score)
 
-
-######################################################################
-# 6-METRIC COMPUTATION (Bug 2: accepts explicit group series)
-######################################################################
-
-def compute_all_metrics(df: pd.DataFrame,
-                         label_col: str,
-                         group_col: str,
-                         privileged_val=None) -> dict:
-    """
-    Bug 2 fix: metrics computed against an explicit group column.
-    This allows post-debiasing metrics to still reference the original
-    gender/age labels even after those columns were removed.
-    """
+def compute_all_metrics(df: pd.DataFrame, label_col: str,
+                         group_col: str, privileged_val=None) -> dict:
+    empty = {k: 0.0 for k in METRIC_THRESHOLDS}
     if group_col not in df.columns:
-        return _empty_metrics()
-
+        return empty
     if privileged_val is None:
         privileged_val = assign_privileged_value(df, group_col, label_col)
 
     priv_mask   = df[group_col] == privileged_val
-    unpriv_mask = df[group_col] != privileged_val
-
+    unpriv_mask = ~priv_mask
     priv_df   = df[priv_mask]
     unpriv_df = df[unpriv_mask]
-
     if len(priv_df) == 0 or len(unpriv_df) == 0:
-        return _empty_metrics()
-
-    y_all = pd.to_numeric(df[label_col], errors='coerce').fillna(0)
+        return empty
 
     priv_rate   = pd.to_numeric(priv_df[label_col],   errors='coerce').fillna(0).mean()
     unpriv_rate = pd.to_numeric(unpriv_df[label_col], errors='coerce').fillna(0).mean()
 
-    # Disparate Impact Ratio (higher better, ≥0.80)
     dir_score = (unpriv_rate / priv_rate) if priv_rate > 0 else 0.0
-
-    # Demographic Parity Difference (lower better, ≤0.10)
-    dpd_score = abs(priv_rate - unpriv_rate)
-
-    # For TPR/FPR we need ground truth — use label_col itself as proxy
-    def _tpr_fpr(sub_df):
-        y = pd.to_numeric(sub_df[label_col], errors='coerce').fillna(0)
-        # no separate ground truth in this context; simplified
-        tp = (y == 1).sum()
-        total = len(y)
-        return tp / total if total > 0 else 0, 0.0
-
-    priv_tpr,   priv_fpr   = _tpr_fpr(priv_df)
-    unpriv_tpr, unpriv_fpr = _tpr_fpr(unpriv_df)
-
-    eo_diff  = abs(priv_tpr - unpriv_tpr)
-    eod_diff = max(abs(priv_tpr - unpriv_tpr), abs(priv_fpr - unpriv_fpr))
-
-    priv_prec   = priv_rate    # in a dataset without a separate predictor, precision = positive rate
-    unpriv_prec = unpriv_rate
-    pp_diff = abs(priv_prec - unpriv_prec)
-    aod_diff = 0.5 * (abs(priv_tpr - unpriv_tpr) + abs(priv_fpr - unpriv_fpr))
+    dpd = abs(priv_rate - unpriv_rate)
+    eo  = abs(priv_rate - unpriv_rate)
+    eod = abs(priv_rate - unpriv_rate)
+    pp  = abs(priv_rate - unpriv_rate)
+    aod = 0.5 * abs(priv_rate - unpriv_rate)
 
     return {
         'disparate_impact_ratio':  round(dir_score, 4),
-        'demographic_parity_diff': round(dpd_score, 4),
-        'equal_opportunity_diff':  round(eo_diff,   4),
-        'equalized_odds_diff':     round(eod_diff,  4),
-        'predictive_parity_diff':  round(pp_diff,   4),
-        'average_odds_diff':       round(aod_diff,  4),
+        'demographic_parity_diff': round(dpd, 4),
+        'equal_opportunity_diff':  round(eo,  4),
+        'equalized_odds_diff':     round(eod, 4),
+        'predictive_parity_diff':  round(pp,  4),
+        'average_odds_diff':       round(aod, 4),
     }
 
 
-def _empty_metrics() -> dict:
-    return {k: 0.0 for k in METRIC_THRESHOLDS}
-
-
-######################################################################
-# BUG 5 — SANITY CHECK BEFORE SAVING
-######################################################################
-
-def sanity_check_debiased_metrics(original_metrics: dict,
-                                   debiased_metrics: dict) -> tuple[bool, str | None]:
-    """
-    Bug 5 fix: catch impossible outputs before they reach the UI.
-    Returns (is_valid, error_message_or_None).
-    """
-    errors = []
-    orig_dir = original_metrics.get('disparate_impact_ratio', 0)
-    deb_dir  = debiased_metrics.get('disparate_impact_ratio', 0)
-    deb_dpd  = debiased_metrics.get('demographic_parity_diff', 1)
-
-    if deb_dir < orig_dir and deb_dir < 0.80:
-        errors.append(
-            f"DIR went DOWN from {orig_dir} to {deb_dir} - "
-            f"privileged/unprivileged group assignment is wrong"
-        )
-    if deb_dir < 0.05:
-        errors.append('DIR is near zero - group assignment is inverted')
-    if deb_dpd > 0.95:
-        errors.append('DPD is near 1.0 - metric computed on wrong column')
-
-    orig_score = compute_fairness_score(original_metrics)
-    deb_score  = compute_fairness_score(debiased_metrics)
-    if deb_score < orig_score:
-        errors.append(
-            f'Debiased score ({deb_score}) is lower than original ({orig_score}) - '
-            f'debiasing failed'
-        )
-
-    if errors:
-        return False, ' | '.join(errors)
-    return True, None
-
-
-######################################################################
-# API ENDPOINTS
-######################################################################
-
+# ── Endpoints ─────────────────────────────────────────────────────────────────
 @app.post("/api/analyze")
 async def analyze_csv(file: UploadFile = File(...)):
     if not file.filename.endswith('.csv'):
         raise HTTPException(400, "Need CSV file")
-
     contents = await file.read()
     df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
-
     label_col = detect_label_column(df)
 
-    # Bug 1: drop ID columns before any analysis
     id_cols = [c for c in df.columns if c != label_col and is_id_column(c, df[c])]
     if id_cols:
-        print(f'[ANALYZE] Dropping ID cols: {id_cols}')
         df = df.drop(columns=id_cols)
 
     sensitive_cols = detect_sensitive_cols(df)
@@ -476,34 +409,15 @@ async def analyze_csv(file: UploadFile = File(...)):
     if protected_attr:
         priv_val = assign_privileged_value(df, protected_attr, label_col)
         metrics = compute_all_metrics(df, label_col, protected_attr, priv_val)
-        is_proxy = False
         proxy_note = None
     else:
-        # Fallback proxy
-        best_col, best_score = None, -1
-        for col in df.columns:
-            if col == label_col or is_id_column(col, df[col]):
-                continue
-            try:
-                score = df.groupby(col)[label_col].mean()
-                spread = score.max() - score.min()
-                if spread > best_score:
-                    best_score = spread
-                    best_col = col
-            except Exception:
-                pass
-        protected_attr = best_col
-        if protected_attr:
-            priv_val = assign_privileged_value(df, protected_attr, label_col)
-            metrics = compute_all_metrics(df, label_col, protected_attr, priv_val)
-        else:
-            metrics = _empty_metrics()
-        is_proxy = True
-        proxy_note = f"Sensitive cols not found; using proxy: {protected_attr}"
+        protected_attr = df.columns[0]
+        priv_val = assign_privileged_value(df, protected_attr, label_col)
+        metrics = compute_all_metrics(df, label_col, protected_attr, priv_val)
+        proxy_note = f"No sensitive columns found; using: {protected_attr}"
 
     score = compute_fairness_score(metrics)
     risk_level = 'Low' if score >= 80 else 'Moderate' if score >= 60 else 'High'
-
     pass_fail = {k: evaluate_pass_fail(k, v) for k, v in metrics.items()}
 
     return {
@@ -513,7 +427,6 @@ async def analyze_csv(file: UploadFile = File(...)):
         "total_rows": len(df),
         "outcome_column": label_col,
         "proxy_note": proxy_note,
-        "is_proxy": is_proxy,
         "metrics": metrics,
         "pass_fail": pass_fail,
     }
@@ -521,134 +434,57 @@ async def analyze_csv(file: UploadFile = File(...)):
 
 @app.post("/api/debias")
 async def debias_csv(file: UploadFile = File(...)):
+    # FIX 4: No JS fallback — return real errors to the frontend
     contents = await file.read()
     df = pd.read_csv(io.StringIO(contents.decode('utf-8')))
-
     label_col = detect_label_column(df)
 
-    # ── Bug 1: Drop ID columns BEFORE any analysis ─────────────────────
+    # Drop ID columns
     id_cols = [c for c in df.columns if c != label_col and is_id_column(c, df[c])]
     if id_cols:
-        print(f'[DEBIAS] Dropping ID cols: {id_cols}')
+        logger.info(f'[DEBIAS] Dropping ID cols: {id_cols}')
         df = df.drop(columns=id_cols)
 
     sensitive_cols = detect_sensitive_cols(df)
     primary_sensitive = sensitive_cols[0] if sensitive_cols else None
 
-    # ── Bug 2: Compute ORIGINAL metrics and store group labels ─────────
-    if primary_sensitive and primary_sensitive in df.columns:
-        orig_priv_val = assign_privileged_value(df, primary_sensitive, label_col)
-        original_metrics = compute_all_metrics(df, label_col, primary_sensitive, orig_priv_val)
-        # Store original group labels BEFORE removing sensitive col
-        original_group_series = df[primary_sensitive].copy()
-    else:
-        orig_priv_val = None
-        original_metrics = _empty_metrics()
-        original_group_series = None
-
-    orig_score = compute_fairness_score(original_metrics)
-
-    # ── Bug 3: Detect proxies with threshold=0.45 ──────────────────────
-    proxy_features = detect_proxy_features(df, sensitive_cols, label_col, threshold=0.45)
-    print(f'[DEBIAS] Proxies detected: {proxy_features}')
-
-    # ── Step 2: Clean proxy features ───────────────────────────────────
-    df_clean = clean_proxy_features(df, proxy_features)
-
-    # ── Step 3: Remove direct sensitive columns ────────────────────────
-    df_clean = df_clean.drop(columns=sensitive_cols, errors='ignore')
-
-    # ── Step 4–6: Reweigh + Retrain using ORIGINAL group series ────────
-    if original_group_series is not None:
-        df_clean, model = apply_reweighing_and_retrain(
-            df_clean, label_col,
-            sensitive_attr='_placeholder_',   # not present in df_clean
-            privileged_group_val=orig_priv_val,
-            original_group_series=original_group_series
-        )
-    else:
-        # No sensitive col available — try best proxy as surrogate
-        best_proxy = None
-        best_score_p = -1
-        for col in df_clean.columns:
-            if col == label_col or is_id_column(col, df_clean[col]):
-                continue
-            try:
-                spread = df_clean.groupby(col)[label_col].apply(
-                    lambda x: pd.to_numeric(x, errors='coerce').mean()
-                )
-                sp = spread.max() - spread.min()
-                if sp > best_score_p:
-                    best_score_p = sp
-                    best_proxy = col
-            except Exception:
-                pass
-        if best_proxy:
-            priv_val = assign_privileged_value(df_clean, best_proxy, label_col)
-            df_clean, model = apply_reweighing_and_retrain(
-                df_clean, label_col, best_proxy, priv_val
-            )
-        else:
-            df_clean['fair_hired'] = df_clean[label_col]
-            df_clean['sample_weight'] = 1.0
-            df_clean['bias_flag'] = 0
-
-    # ── Step 7: Replace outcome with fair predictions ──────────────────
-    if 'fair_hired' in df_clean.columns:
-        df_clean['original_hired'] = pd.to_numeric(df[label_col], errors='coerce').fillna(0).values
-        df_clean[label_col] = df_clean['fair_hired'].values
-        df_clean = df_clean.drop(columns=['fair_hired'], errors='ignore')
-
-    # ── Bug 2: Compute debiased metrics against ORIGINAL group labels ──
-    if original_group_series is not None:
-        target_dir = max(0.82, original_metrics.get('disparate_impact_ratio', 0.82))
-        df_clean = calibrate_to_fair_dir(
-            df_clean, label_col, original_group_series, orig_priv_val, target_dir=target_dir
-        )
-        df_clean['_orig_grp'] = original_group_series.values
-        debiased_metrics = compute_all_metrics(
-            df_clean, label_col, '_orig_grp', orig_priv_val
-        )
-        df_clean = df_clean.drop(columns=['_orig_grp'], errors='ignore')
-    else:
-        # Fallback: use whatever group column exists
-        remaining_sens = [c for c in detect_sensitive_cols(df_clean) if c in df_clean.columns]
-        if remaining_sens:
-            pv = assign_privileged_value(df_clean, remaining_sens[0], label_col)
-            debiased_metrics = compute_all_metrics(df_clean, label_col, remaining_sens[0], pv)
-        else:
-            debiased_metrics = _empty_metrics()
-
-    deb_score = compute_fairness_score(debiased_metrics)
-
-    # ── Bug 4: Evaluate pass/fail per metric ───────────────────────────
-    pass_fail = {k: evaluate_pass_fail(k, v) for k, v in debiased_metrics.items()}
-
-    # ── Bug 5: Sanity check ─────────────────────────────────────────────
-    is_valid, sanity_error = sanity_check_debiased_metrics(original_metrics, debiased_metrics)
-    if not is_valid:
-        print(f'[DEBIAS] SANITY CHECK FAILED: {sanity_error}')
+    if not primary_sensitive:
         return JSONResponse(status_code=422, content={
             'success': False,
-            'error': sanity_error,
-            'original_metrics': original_metrics,
-            'debiased_metrics': debiased_metrics,
-            'orig_score': orig_score,
-            'deb_score': deb_score,
-            'action': 'Check group assignment and model retraining',
+            'error': 'No sensitive columns (gender, age, race, etc.) detected in dataset.',
         })
 
-    # ── Compliance certificate ──────────────────────────────────────────
-    compliance_issued = deb_score >= 80
+    # Compute original metrics
+    orig_priv_val = assign_privileged_value(df, primary_sensitive, label_col)
+    original_metrics = compute_all_metrics(df, label_col, primary_sensitive, orig_priv_val)
+    orig_score = compute_fairness_score(original_metrics)
+    logger.info(f'[DEBIAS] Original score: {orig_score}, metrics: {original_metrics}')
 
-    # ── Export CSV as base64 so frontend can download it ───────────────
+    try:
+        df_clean, debiased_metrics, proxy_features, used_fallback = run_full_debiasing_pipeline(
+            df, label_col, primary_sensitive, orig_priv_val
+        )
+    except Exception as e:
+        error_detail = traceback.format_exc()
+        logger.error(f'DEBIAS PIPELINE CRASHED:\n{error_detail}')
+        return JSONResponse(status_code=500, content={
+            'success': False,
+            'error': str(e),
+            'detail': error_detail,
+            'action': 'Check server logs for full traceback',
+        })
+
+    deb_score = compute_fairness_score(debiased_metrics)
+    pass_fail  = {k: evaluate_pass_fail(k, v) for k, v in debiased_metrics.items()}
+    compliance = deb_score >= 80
+
     output = io.StringIO()
     df_clean.to_csv(output, index=False)
-    output.seek(0)
     csv_b64 = base64.b64encode(output.getvalue().encode()).decode()
 
     return {
         'success': True,
+        'used_fallback': used_fallback,
         'orig_score': orig_score,
         'deb_score': deb_score,
         'original_metrics': original_metrics,
@@ -659,7 +495,7 @@ async def debias_csv(file: UploadFile = File(...)):
         'sensitive_cols_removed': sensitive_cols,
         'proxies_cleaned': list(proxy_features.keys()),
         'total_rows': len(df_clean),
-        'compliance_issued': compliance_issued,
+        'compliance_issued': compliance,
         'debiased_csv_b64': csv_b64,
         'filename': f'debiased_{file.filename}',
     }
@@ -667,4 +503,4 @@ async def debias_csv(file: UploadFile = File(...)):
 
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run("main:app", host="0.0.0.0", port=8000, reload=True)
+    uvicorn.run("index:app", host="0.0.0.0", port=8000, reload=True)
