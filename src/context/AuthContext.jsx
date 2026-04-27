@@ -40,7 +40,7 @@ export const AuthProvider = ({ children }) => {
         setError(null); // Clear any error since we succeeded in demo mode
         return demoUser;
       }
-      
+
       setError(err.message);
       console.error("Login error:", err);
       throw err;

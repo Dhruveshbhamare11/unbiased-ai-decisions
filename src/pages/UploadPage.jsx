@@ -85,7 +85,7 @@ const UploadPage = () => {
  validateAndSetFile(sampleFile);
  };
 
- const BACKEND_URL = 'http://localhost:8000';
+ const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || '';
 
  const startAnalysis = async () => {
  if (!file) return;
@@ -329,7 +329,7 @@ const UploadPage = () => {
  </div>
  <div className="p-3 bg-slate-800 rounded-xl border border-slate-700">
  <p className="text-[10px] font-black uppercase tracking-widest text-slate-500 mb-1">API Endpoint</p>
- <p className="text-xs font-mono text-blue-400">http://localhost:8000</p>
+ <p className="text-xs font-mono text-blue-400">/api/analyze</p>
  </div>
  </div>
  </div>

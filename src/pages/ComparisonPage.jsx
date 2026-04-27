@@ -17,7 +17,7 @@ const ComparisonPage = () => {
 
  const [engineUsed, setEngineUsed] = useState(null); // 'backend' | 'js'
 
- const BACKEND_URL = 'http://localhost:8000';
+ const BACKEND_URL = import.meta.env.VITE_BACKEND_URL || '';
 
  const handleGenerateDebiased = async () => {
  setIsGeneratingDebiased(true);

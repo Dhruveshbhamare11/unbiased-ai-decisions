@@ -126,7 +126,7 @@ def detect_proxy_features(df: pd.DataFrame, sensitive_cols: list,
 
         if max_corr >= threshold:
             proxies[col] = round(max_corr, 3)
-            print(f'[PROXY] Flagged: {col} → corr={max_corr:.3f}')
+            print(f'[PROXY] Flagged: {col} -> corr={max_corr:.3f}')
 
     return proxies
 
@@ -206,7 +206,7 @@ def calibrate_to_fair_dir(
     for idx in to_flip:
         df.at[idx, label_col] = 1
 
-    print(f'[CALIBRATE] Flipped {len(to_flip)} unprivileged rows → hired to reach DIR ≥ {target_dir}')
+    print(f'[CALIBRATE] Flipped {len(to_flip)} unprivileged rows -> hired to reach DIR >= {target_dir}. New priv_rate={priv_rate}, unpriv_rate={y[unpriv_mask].sum() / unpriv_mask.sum() if unpriv_mask.sum() else 0}')
     return df
 def apply_reweighing_and_retrain(df_work_in: pd.DataFrame,
                                   label_col: str,
@@ -429,19 +429,19 @@ def sanity_check_debiased_metrics(original_metrics: dict,
 
     if deb_dir < orig_dir and deb_dir < 0.80:
         errors.append(
-            f"DIR went DOWN from {orig_dir} to {deb_dir} — "
+            f"DIR went DOWN from {orig_dir} to {deb_dir} - "
             f"privileged/unprivileged group assignment is wrong"
         )
     if deb_dir < 0.05:
-        errors.append('DIR is near zero — group assignment is inverted')
+        errors.append('DIR is near zero - group assignment is inverted')
     if deb_dpd > 0.95:
-        errors.append('DPD is near 1.0 — metric computed on wrong column')
+        errors.append('DPD is near 1.0 - metric computed on wrong column')
 
     orig_score = compute_fairness_score(original_metrics)
     deb_score  = compute_fairness_score(debiased_metrics)
     if deb_score < orig_score:
         errors.append(
-            f'Debiased score ({deb_score}) is lower than original ({orig_score}) — '
+            f'Debiased score ({deb_score}) is lower than original ({orig_score}) - '
             f'debiasing failed'
         )
 
