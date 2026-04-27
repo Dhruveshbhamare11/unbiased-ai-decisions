@@ -1,6 +1,8 @@
 # ⚖️ FairLens AI
 > **AI Bias Detection & Mitigation Platform**
 
+🔗 **Live Demo:** [unbiased-ai-decisions.vercel.app](https://unbiased-ai-decisions.vercel.app)
+
 Welcome to **FairLens AI**, an enterprise-grade, privacy-first platform engineered to detect, visualize, and autonomously mitigate demographic bias in predictive AI models. 
 
 Designed for the **Google Solution Challenge 2026**, this platform empowers data scientists, compliance officers, and non-technical stakeholders to ensure their models comply with strict regulatory frameworks like the **EU AI Act** and **EEOC Guidelines**.
